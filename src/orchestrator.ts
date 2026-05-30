@@ -1,0 +1,201 @@
+import { format } from 'date-fns';
+import { toZonedTime } from 'date-fns-tz';
+import { isDryRun, isBlogDay, isMonday, isFirstOfMonth, todayDayName } from './lib/config.js';
+import { closeBrowser } from './lib/browser.js';
+import { notify, notifyError } from './lib/line.js';
+import { logger } from './lib/logger.js';
+import type { Review, AgentResult } from './types/index.js';
+
+import { runReviewWatcher } from './agents/reviewWatcher.js';
+import { runSafetyClassifier } from './agents/safetyClassifier.js';
+import { runReplyDrafter } from './agents/replyDrafter.js';
+import { runReplyPoster } from './agents/replyPoster.js';
+import { runBlogIdeator } from './agents/blogIdeator.js';
+import { runBlogWriter } from './agents/blogWriter.js';
+import { runBlogPoster } from './agents/blogPoster.js';
+import { runCompetitorScraper } from './agents/competitorScraper.js';
+import { runRankWatcher } from './agents/rankWatcher.js';
+import { runWeeklyReporter } from './agents/weeklyReporter.js';
+
+const TZ = 'Asia/Tokyo';
+
+function parseAgentFilter(): string[] | null {
+  const idx = process.argv.indexOf('--agents');
+  if (idx === -1) return null;
+  const val = process.argv[idx + 1];
+  return val ? val.split(',').map(s => s.trim()) : null;
+}
+
+async function runWithTimer<T>(
+  name: string,
+  fn: () => Promise<T>
+): Promise<{ result: T | null; durationMs: number; error: string | null }> {
+  const start = Date.now();
+  try {
+    const result = await fn();
+    return { result, durationMs: Date.now() - start, error: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: null, durationMs: Date.now() - start, error: msg };
+  }
+}
+
+async function main(): Promise<void> {
+  const now = toZonedTime(new Date(), TZ);
+  const dateStr = format(now, 'yyyy年MM月dd日');
+  const dayName = todayDayName();
+  const dryRun = isDryRun();
+  const agentFilter = parseAgentFilter();
+
+  const prefix = dryRun ? '[DRY RUN] ' : '';
+  logger.info({ event: 'orchestrator_start', date: dateStr, dayName, dryRun }, `${prefix}Orchestrator started`);
+  console.log(`\n🤖 ${prefix}リライン HPB自動化 - ${dateStr}\n`);
+
+  const results: AgentResult[] = [];
+  const errors: string[] = [];
+
+  const shouldRun = (name: string) => !agentFilter || agentFilter.includes(name);
+
+  // ─────────────── 毎日実行: 口コミ監視・返信 ───────────────
+  let newReviews: Review[] = [];
+  let autoPostCount = 0;
+  let warnCount = 0;
+  let dangerCount = 0;
+
+  if (shouldRun('reviewWatcher')) {
+    const { result } = await runWithTimer('reviewWatcher', runReviewWatcher);
+    if (result) {
+      results.push(result);
+      if (result.status === 'ok') {
+        newReviews = (result.data as { total: number; newReviews: Review[] }).newReviews;
+      } else {
+        errors.push(`reviewWatcher: ${result.error}`);
+        await notifyError('reviewWatcher', result.error ?? '不明なエラー');
+      }
+    }
+  }
+
+  if (newReviews.length > 0 && shouldRun('safetyClassifier')) {
+    const { result } = await runWithTimer('safetyClassifier', () => runSafetyClassifier(newReviews));
+    if (result) {
+      results.push(result);
+      const classified = (result.data as { classified: never[] }).classified ?? [];
+
+      if (shouldRun('replyDrafter')) {
+        const { result: drafterResult } = await runWithTimer('replyDrafter', () => runReplyDrafter(classified));
+        if (drafterResult) {
+          results.push(drafterResult);
+          const data = drafterResult.data as { autoPostDrafts: never[]; warnDrafts: never[]; dangerCount: number } | undefined;
+          const autoPostDrafts = data?.autoPostDrafts ?? [];
+          warnCount = data?.warnDrafts.length ?? 0;
+          dangerCount = data?.dangerCount ?? 0;
+
+          if (shouldRun('replyPoster')) {
+            const { result: posterResult } = await runWithTimer('replyPoster', () => runReplyPoster(autoPostDrafts));
+            if (posterResult) {
+              results.push(posterResult);
+              autoPostCount = (posterResult.data as { successCount?: number })?.successCount ?? 0;
+              if (posterResult.status === 'error') {
+                errors.push(`replyPoster: ${posterResult.error}`);
+                await notifyError('replyPoster', posterResult.error ?? '不明なエラー');
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ─────────────── 月・水・金: ブログ投稿 ───────────────
+  let blogPosted = false;
+
+  if (isBlogDay(dayName) && shouldRun('blogIdeator')) {
+    const { result: ideaResult } = await runWithTimer('blogIdeator', runBlogIdeator);
+    if (ideaResult?.status === 'ok') {
+      results.push(ideaResult);
+      const idea = (ideaResult.data as { idea: never })?.idea;
+
+      if (idea && shouldRun('blogWriter')) {
+        const { result: writerResult } = await runWithTimer('blogWriter', () => runBlogWriter(idea));
+        if (writerResult?.status !== 'error') {
+          results.push(writerResult!);
+          const data = writerResult!.data as { draft: never; draftId: number } | undefined;
+          const draft = data?.draft;
+          const draftId = data?.draftId ?? 0;
+
+          if (draft && shouldRun('blogPoster')) {
+            const { result: posterResult } = await runWithTimer('blogPoster', () => runBlogPoster(draft, draftId));
+            if (posterResult) {
+              results.push(posterResult);
+              blogPosted = posterResult.status === 'ok';
+              if (posterResult.status === 'error') {
+                errors.push(`blogPoster: ${posterResult.error}`);
+                await notifyError('blogPoster', posterResult.error ?? '不明なエラー');
+              }
+            }
+          }
+        }
+      }
+    } else if (ideaResult) {
+      errors.push(`blogIdeator: ${ideaResult.error}`);
+    }
+  }
+
+  // ─────────────── 月曜: 競合調査・順位確認・週次レポート ───────────────
+  if (isMonday()) {
+    if (shouldRun('competitorScraper')) {
+      const { result } = await runWithTimer('competitorScraper', runCompetitorScraper);
+      if (result) {
+        results.push(result);
+        if (result.status === 'error') {
+          errors.push(`competitorScraper: ${result.error}`);
+        }
+      }
+    }
+
+    if (shouldRun('rankWatcher')) {
+      const { result } = await runWithTimer('rankWatcher', runRankWatcher);
+      if (result) results.push(result);
+    }
+
+    if (shouldRun('weeklyReporter')) {
+      const { result } = await runWithTimer('weeklyReporter', runWeeklyReporter);
+      if (result) results.push(result);
+    }
+  }
+
+  // ─────────────── 日次 LINE 通知サマリー ───────────────
+  const allOk = errors.length === 0;
+  const summaryLines = [
+    `${dateStr} の実行結果`,
+    ``,
+    `口コミ:`,
+    `  新着 ${newReviews.length}件`,
+    autoPostCount > 0 ? `  自動返信済み ${autoPostCount}件` : null,
+    warnCount > 0 ? `  承認待ち ${warnCount}件 (詳細は別途通知済み)` : null,
+    dangerCount > 0 ? `  要対応 ${dangerCount}件 (詳細は別途通知済み)` : null,
+    isBlogDay(dayName) ? `ブログ: ${blogPosted ? '投稿完了' : dryRun ? '[DRY] 生成のみ' : '投稿失敗'}` : null,
+    isMonday() ? `競合調査・順位確認: 完了` : null,
+    ``,
+    errors.length > 0 ? `エラー ${errors.length}件:\n${errors.map(e => `  - ${e}`).join('\n')}` : `エラー: 0件`,
+  ].filter(Boolean).join('\n');
+
+  await notify(allOk ? 'info' : 'error', summaryLines);
+
+  logger.info({ event: 'orchestrator_done', errors: errors.length }, 'Orchestrator completed');
+  console.log(`\n✅ 完了 (${results.length}エージェント実行, エラー${errors.length}件)\n`);
+}
+
+main()
+  .catch(async (err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ event: 'orchestrator_fatal', error: msg }, 'Fatal error');
+    console.error('Fatal error:', msg);
+    try {
+      await notifyError('orchestrator', `致命的エラーが発生しました:\n${msg}`);
+    } catch {}
+    process.exit(1);
+  })
+  .finally(async () => {
+    await closeBrowser();
+  });

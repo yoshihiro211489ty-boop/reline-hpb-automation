@@ -1,0 +1,24 @@
+schedule:
+  orchestrator_hour: 8
+  orchestrator_minute: 0
+  notify_summary_offset_minutes: 30  # 8:30にLINEサマリー送信
+
+jobs:
+  daily:
+    - reviewWatcher
+    - safetyClassifier
+    - replyDrafter
+    - replyPoster
+
+  monday_wednesday_friday:
+    - blogIdeator
+    - blogWriter
+    - blogPoster
+
+  monday_only:
+    - competitorScraper
+    - rankWatcher
+    - weeklyReporter
+
+  first_of_month:
+    - couponPlanner
