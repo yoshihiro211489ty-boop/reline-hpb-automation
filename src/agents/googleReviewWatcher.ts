@@ -1,7 +1,7 @@
 import { listReviews } from '../lib/googleBusiness.js';
 import { googleReviewRepo, auditLog } from '../lib/db.js';
 import { logger } from '../lib/logger.js';
-import { loadConfig } from '../lib/config.js';
+import { getConfig } from '../lib/config.js';
 import type { GoogleReview, AgentResult, Review } from '../types/index.js';
 
 /**
@@ -14,7 +14,7 @@ export async function runGoogleReviewWatcher(): Promise<AgentResult> {
   logger.info({ agent: 'googleReviewWatcher', event: 'start' }, 'Google口コミ監視 開始');
 
   try {
-    const config = loadConfig();
+    const config = getConfig();
     const locationName: string | undefined = config.salon?.google_location_name;
     if (!locationName) {
       throw new Error(

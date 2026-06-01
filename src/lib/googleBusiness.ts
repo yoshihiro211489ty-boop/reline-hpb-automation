@@ -10,6 +10,7 @@ import type { GoogleReview } from '../types/index.js';
 import { GOOGLE_STAR_MAP } from '../types/index.js';
 
 const BASE_URL = 'https://mybusiness.googleapis.com/v4';
+const ACCOUNT_MGMT_URL = 'https://mybusinessaccountmanagement.googleapis.com/v1';
 
 async function apiFetch(path: string, options: RequestInit = {}): Promise<unknown> {
   const token = await getAccessToken();
@@ -33,7 +34,7 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<unknow
 
 /** アカウント一覧を取得（通常は1件） */
 export async function listAccounts(): Promise<{ name: string; accountName: string }[]> {
-  const data = await apiFetch('accounts') as { accounts?: Array<{ name: string; accountName: string }> };
+  const data = await apiFetch(`${ACCOUNT_MGMT_URL}/accounts`) as { accounts?: Array<{ name: string; accountName: string }> };
   return data.accounts ?? [];
 }
 
@@ -42,7 +43,7 @@ export async function listAccounts(): Promise<{ name: string; accountName: strin
  * accountName 例: "accounts/123456789"
  */
 export async function listLocations(accountName: string): Promise<{ name: string; title: string }[]> {
-  const data = await apiFetch(`${accountName}/locations?readMask=name,title`) as {
+  const data = await apiFetch(`${ACCOUNT_MGMT_URL}/${accountName}/locations?readMask=name,title`) as {
     locations?: Array<{ name: string; title: string }>;
   };
   return data.locations ?? [];
