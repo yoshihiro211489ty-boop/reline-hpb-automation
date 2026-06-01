@@ -15,6 +15,7 @@ interface SalonConfig {
     closed: string[];
     line_reservation: string;
     hp: string;
+    google_location_name?: string;
   };
   owner: {
     name: string;

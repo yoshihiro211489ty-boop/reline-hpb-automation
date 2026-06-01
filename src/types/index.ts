@@ -93,3 +93,29 @@ export interface AgentResult {
   error?: string;
   durationMs: number;
 }
+
+// ─── Google Business Profile ───────────────────────────────────────────────
+
+/** Google の星評価文字列 → 数値 */
+export const GOOGLE_STAR_MAP: Record<string, number> = {
+  ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5,
+};
+
+export interface GoogleReview {
+  /** Google APIのリソース名 (accounts/.../locations/.../reviews/...) */
+  name: string;
+  /** レビューID（name の末尾部分） */
+  reviewId: string;
+  starRating: number;
+  body: string;
+  authorName: string;
+  isAnonymous: boolean;
+  postedAt: string;
+  hasReply: boolean;
+}
+
+export interface GooglePostResult {
+  reviewId: string;
+  status: 'posted' | 'failed' | 'dry_run' | 'skipped';
+  error?: string;
+}

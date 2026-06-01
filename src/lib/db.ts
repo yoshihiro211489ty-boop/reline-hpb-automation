@@ -1,7 +1,7 @@
 import { DatabaseSync, StatementSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
-import type { Review, ReviewDraft, PostResult, BlogDraft, BlogPostResult, CompetitorSnapshot, RankResult } from '../types/index.js';
+import type { Review, ReviewDraft, PostResult, BlogDraft, BlogPostResult, CompetitorSnapshot, RankResult, GoogleReview, GooglePostResult } from '../types/index.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -79,6 +79,36 @@ db.exec(`
     keyword TEXT NOT NULL,
     rank INTEGER,
     captured_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS google_reviews (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    star_rating INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    is_anonymous INTEGER NOT NULL DEFAULT 0,
+    posted_at TEXT NOT NULL,
+    has_reply INTEGER NOT NULL DEFAULT 0,
+    captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS google_review_drafts (
+    review_id TEXT PRIMARY KEY,
+    risk_level TEXT NOT NULL,
+    reasons TEXT NOT NULL,
+    key_phrases TEXT NOT NULL,
+    estimated_visit_count TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    draft_text TEXT NOT NULL,
+    generated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS google_review_posts (
+    review_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    error TEXT,
+    posted_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS audit_log (
@@ -244,6 +274,59 @@ export const rankRepo = {
       )
     `).all() as { keyword: string; rank: number | null }[];
     return new Map(rows.map(r => [r.keyword, r.rank]));
+  },
+};
+
+export const googleReviewRepo = {
+  upsert(review: GoogleReview): void {
+    db.prepare(`
+      INSERT INTO google_reviews (id, name, star_rating, body, author_name, is_anonymous, posted_at, has_reply)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET has_reply = excluded.has_reply
+    `).run(
+      review.reviewId, review.name, review.starRating, review.body,
+      review.authorName, review.isAnonymous ? 1 : 0,
+      review.postedAt, review.hasReply ? 1 : 0,
+    );
+  },
+  seenIds(): Set<string> {
+    const rows = db.prepare('SELECT id FROM google_reviews').all() as { id: string }[];
+    return new Set(rows.map(r => r.id));
+  },
+  getByReviewId(reviewId: string): GoogleReview | undefined {
+    const r = db.prepare('SELECT * FROM google_reviews WHERE id = ?').get(reviewId) as Record<string, unknown> | undefined;
+    if (!r) return undefined;
+    return {
+      reviewId: r.id as string,
+      name: r.name as string,
+      starRating: r.star_rating as number,
+      body: r.body as string,
+      authorName: r.author_name as string,
+      isAnonymous: Boolean(r.is_anonymous),
+      postedAt: r.posted_at as string,
+      hasReply: Boolean(r.has_reply),
+    };
+  },
+  isPosted(reviewId: string): boolean {
+    const row = db.prepare('SELECT status FROM google_review_posts WHERE review_id = ?').get(reviewId) as { status: string } | undefined;
+    return row?.status === 'posted';
+  },
+  saveDraft(draft: ReviewDraft): void {
+    db.prepare(`
+      INSERT OR REPLACE INTO google_review_drafts
+        (review_id, risk_level, reasons, key_phrases, estimated_visit_count, summary, draft_text, generated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      draft.id, draft.riskLevel,
+      JSON.stringify(draft.reasons), JSON.stringify(draft.keyPhrases),
+      draft.estimatedVisitCount, draft.summary, draft.draftText, draft.generatedAt,
+    );
+  },
+  savePostResult(result: GooglePostResult): void {
+    db.prepare(`
+      INSERT OR REPLACE INTO google_review_posts (review_id, status, error)
+      VALUES (?, ?, ?)
+    `).run(result.reviewId, result.status, result.error ?? null);
   },
 };
 

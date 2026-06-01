@@ -13,7 +13,9 @@
     "test:salonboard": "node dist/scripts/test-salonboard.js",
     "db:init": "node dist/scripts/db-init.js",
     "dev": "ts-node src/orchestrator.ts",
-    "dev:dry": "DRY_RUN=1 ts-node src/orchestrator.ts"
+    "dev:dry": "DRY_RUN=1 ts-node src/orchestrator.ts",
+    "google:setup": "npx ts-node scripts/setup-google-auth.ts",
+    "dry-run:google": "DRY_RUN=1 node dist/orchestrator.js --agents=googleReviewWatcher,googleSafetyClassifier,googleReplyDrafter,googleReplyPoster"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.54.0",
@@ -22,6 +24,7 @@
     "date-fns": "^4.1.0",
     "date-fns-tz": "^3.2.0",
     "eta": "^3.5.0",
+    "googleapis": "^173.0.0",
     "p-retry": "^6.2.1",
     "pino": "^9.6.0",
     "pino-pretty": "^13.1.3",

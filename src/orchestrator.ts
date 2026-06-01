@@ -16,6 +16,8 @@ import { runBlogPoster } from './agents/blogPoster.js';
 import { runCompetitorScraper } from './agents/competitorScraper.js';
 import { runRankWatcher } from './agents/rankWatcher.js';
 import { runWeeklyReporter } from './agents/weeklyReporter.js';
+import { runGoogleReviewWatcher } from './agents/googleReviewWatcher.js';
+import { runGoogleReplyPoster } from './agents/googleReplyPoster.js';
 
 const TZ = 'Asia/Tokyo';
 
@@ -106,6 +108,72 @@ async function main(): Promise<void> {
     }
   }
 
+  // ─────────────── 毎日実行: Google口コミ監視・返信 ───────────────
+  let googleAutoPostCount = 0;
+  let googleWarnCount = 0;
+  let googleDangerCount = 0;
+  let googleNewReviews: Review[] = [];
+
+  if (shouldRun('googleReviewWatcher')) {
+    const { result: gWatcherResult } = await runWithTimer('googleReviewWatcher', runGoogleReviewWatcher);
+    if (gWatcherResult) {
+      results.push(gWatcherResult);
+      if (gWatcherResult.status === 'ok') {
+        const data = gWatcherResult.data as { newReviews: Review[] };
+        googleNewReviews = data.newReviews;
+      } else {
+        // Google設定未完了の場合は静かにスキップ（設定前は error になる）
+        const isSetupError = gWatcherResult.error?.includes('google_location_name') ||
+                             gWatcherResult.error?.includes('Keychain');
+        if (!isSetupError) {
+          errors.push(`googleReviewWatcher: ${gWatcherResult.error}`);
+          await notifyError('googleReviewWatcher', gWatcherResult.error ?? '不明なエラー');
+        } else {
+          logger.info({ agent: 'orchestrator' }, 'Google口コミ: 未設定のためスキップ');
+        }
+      }
+    }
+  }
+
+  if (googleNewReviews.length > 0 && shouldRun('googleSafetyClassifier')) {
+    // HPBと同じ safetyClassifier を再利用
+    const { result: gClassResult } = await runWithTimer('googleSafetyClassifier', () =>
+      runSafetyClassifier(googleNewReviews),
+    );
+    if (gClassResult) {
+      results.push({ ...gClassResult, agent: 'googleSafetyClassifier' });
+      const classified = (gClassResult.data as { classified: never[] }).classified ?? [];
+
+      if (shouldRun('googleReplyDrafter')) {
+        // HPBと同じ replyDrafter を再利用（ペルソナ・ロジックは共通）
+        const { result: gDrafterResult } = await runWithTimer('googleReplyDrafter', () =>
+          runReplyDrafter(classified),
+        );
+        if (gDrafterResult) {
+          results.push({ ...gDrafterResult, agent: 'googleReplyDrafter' });
+          const data = gDrafterResult.data as { autoPostDrafts: never[]; warnDrafts: never[]; dangerCount: number } | undefined;
+          const autoPostDrafts = data?.autoPostDrafts ?? [];
+          googleWarnCount = data?.warnDrafts.length ?? 0;
+          googleDangerCount = data?.dangerCount ?? 0;
+
+          if (shouldRun('googleReplyPoster')) {
+            const { result: gPosterResult } = await runWithTimer('googleReplyPoster', () =>
+              runGoogleReplyPoster(autoPostDrafts),
+            );
+            if (gPosterResult) {
+              results.push(gPosterResult);
+              googleAutoPostCount = (gPosterResult.data as { successCount?: number })?.successCount ?? 0;
+              if (gPosterResult.status === 'error') {
+                errors.push(`googleReplyPoster: ${gPosterResult.error}`);
+                await notifyError('googleReplyPoster', gPosterResult.error ?? '不明なエラー');
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   // ─────────────── 月・水・金: ブログ投稿 ───────────────
   let blogPosted = false;
 
@@ -169,12 +237,18 @@ async function main(): Promise<void> {
   const summaryLines = [
     `${dateStr} の実行結果`,
     ``,
-    `口コミ:`,
+    `【HPB口コミ】`,
     `  新着 ${newReviews.length}件`,
     autoPostCount > 0 ? `  自動返信済み ${autoPostCount}件` : null,
-    warnCount > 0 ? `  承認待ち ${warnCount}件 (詳細は別途通知済み)` : null,
-    dangerCount > 0 ? `  要対応 ${dangerCount}件 (詳細は別途通知済み)` : null,
-    isBlogDay(dayName) ? `ブログ: ${blogPosted ? '投稿完了' : dryRun ? '[DRY] 生成のみ' : '投稿失敗'}` : null,
+    warnCount > 0 ? `  承認待ち ${warnCount}件 (別途通知済み)` : null,
+    dangerCount > 0 ? `  要対応 ${dangerCount}件 (別途通知済み)` : null,
+    ``,
+    `【Google口コミ】`,
+    `  新着 ${googleNewReviews.length}件`,
+    googleAutoPostCount > 0 ? `  自動返信済み ${googleAutoPostCount}件` : null,
+    googleWarnCount > 0 ? `  承認待ち ${googleWarnCount}件 (別途通知済み)` : null,
+    googleDangerCount > 0 ? `  要対応 ${googleDangerCount}件 (別途通知済み)` : null,
+    isBlogDay(dayName) ? `\nブログ: ${blogPosted ? '投稿完了' : dryRun ? '[DRY] 生成のみ' : '投稿失敗'}` : null,
     isMonday() ? `競合調査・順位確認: 完了` : null,
     ``,
     errors.length > 0 ? `エラー ${errors.length}件:\n${errors.map(e => `  - ${e}`).join('\n')}` : `エラー: 0件`,

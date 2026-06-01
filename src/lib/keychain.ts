@@ -14,6 +14,9 @@ const ENTRIES = {
   lineTargetUserId:     { service: `${SERVICE_PREFIX}-line`,       account: 'target-user-id' },
   anthropicApiKey:      { service: `${SERVICE_PREFIX}-anthropic`,  account: 'api-key' },
   hpbSalonId:           { service: `${SERVICE_PREFIX}-hpb`,        account: 'salon-id' },
+  googleClientId:       { service: `${SERVICE_PREFIX}-google`,     account: 'client-id' },
+  googleClientSecret:   { service: `${SERVICE_PREFIX}-google`,     account: 'client-secret' },
+  googleRefreshToken:   { service: `${SERVICE_PREFIX}-google`,     account: 'refresh-token' },
 } as const;
 
 type EntryKey = keyof typeof ENTRIES;
@@ -38,10 +41,13 @@ export const keychain = {
   get(key: EntryKey): string {
     return get(ENTRIES[key]);
   },
-  salonboardUser: ()   => get(ENTRIES.salonboardUser),
-  salonboardPass: ()   => get(ENTRIES.salonboardPass),
-  lineChannelToken: () => get(ENTRIES.lineChannelToken),
-  lineTargetUserId: () => get(ENTRIES.lineTargetUserId),
-  anthropicApiKey: ()  => get(ENTRIES.anthropicApiKey),
-  hpbSalonId: ()       => get(ENTRIES.hpbSalonId),
+  salonboardUser: ()     => get(ENTRIES.salonboardUser),
+  salonboardPass: ()     => get(ENTRIES.salonboardPass),
+  lineChannelToken: ()   => get(ENTRIES.lineChannelToken),
+  lineTargetUserId: ()   => get(ENTRIES.lineTargetUserId),
+  anthropicApiKey: ()    => get(ENTRIES.anthropicApiKey),
+  hpbSalonId: ()         => get(ENTRIES.hpbSalonId),
+  googleClientId: ()     => get(ENTRIES.googleClientId),
+  googleClientSecret: () => get(ENTRIES.googleClientSecret),
+  googleRefreshToken: () => get(ENTRIES.googleRefreshToken),
 };

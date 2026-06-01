@@ -9,6 +9,9 @@ salon:
     - "土曜"
   line_reservation: "https://lin.ee/HNYFtu5g"
   hp: "https://reline-yonago.com"
+  # Google Business Profile のロケーション名（setup-google-auth 実行後に設定）
+  # 例: accounts/123456789012/locations/987654321098
+  google_location_name: ""
 
 owner:
   name: "武田嘉浩"
