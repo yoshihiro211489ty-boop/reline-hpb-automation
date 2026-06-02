@@ -1,6 +1,7 @@
 import { askClaude } from '../lib/claude.js';
 import { buildReplyPrompt } from '../lib/persona.js';
 import { checkReplyText } from '../lib/safety.js';
+import { checkReplyGrounding } from '../lib/groundingCheck.js';
 import { reviewRepo, auditLog } from '../lib/db.js';
 import { notifyDanger, notifyWarnDraft } from '../lib/line.js';
 import { logger } from '../lib/logger.js';
@@ -53,6 +54,29 @@ export async function runReplyDrafter(classified: ClassifiedReview[]): Promise<A
         const draft: ReviewDraft = { ...review, draftText, generatedAt: new Date().toISOString() };
         reviewRepo.saveDraft({ ...draft, riskLevel: 'warn', reasons: [...review.reasons, ...safetyCheck.issues] });
         warnDrafts.push(draft);
+        continue;
+      }
+
+      // ── グラウンディングチェック: 口コミに書かれていないことを引用していないか ──
+      const groundingCheck = await checkReplyGrounding(review.body, draftText);
+      if (!groundingCheck.passed) {
+        logger.warn(
+          { agent: 'replyDrafter', reviewId: review.id, issues: groundingCheck.issues },
+          'Grounding check failed — escalating to warn for human review',
+        );
+        const draft: ReviewDraft = { ...review, draftText, generatedAt: new Date().toISOString() };
+        reviewRepo.saveDraft({
+          ...draft,
+          riskLevel: 'warn',
+          reasons: [...review.reasons, ...groundingCheck.issues],
+        });
+        warnDrafts.push(draft);
+        await notifyWarnDraft(
+          `[グラウンディング問題] ${review.authorNickname}さまへの返信に要確認箇所があります:\n` +
+          groundingCheck.issues.map(i => `・${i}`).join('\n'),
+          draftText,
+          review.id,
+        );
         continue;
       }
 
