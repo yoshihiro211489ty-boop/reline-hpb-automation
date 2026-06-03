@@ -1,8 +1,6 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import https from 'https';
-import http from 'http';
 import OpenAI from 'openai';
 import { logger } from '../lib/logger.js';
 import { auditLog } from '../lib/db.js';
@@ -36,38 +34,6 @@ function ensureImageDirs(): void {
   }
 }
 
-function downloadImage(url: string, destPath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(destPath);
-    const protocol = url.startsWith('https') ? https : http;
-    protocol.get(url, (response) => {
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        const redirectUrl = response.headers.location;
-        if (!redirectUrl) {
-          reject(new Error('Redirect without location header'));
-          return;
-        }
-        file.close();
-        fs.unlinkSync(destPath);
-        downloadImage(redirectUrl, destPath).then(resolve).catch(reject);
-        return;
-      }
-      if (response.statusCode !== 200) {
-        reject(new Error(`HTTP ${response.statusCode} when downloading image`));
-        return;
-      }
-      response.pipe(file);
-      file.on('finish', () => {
-        file.close();
-        resolve();
-      });
-    }).on('error', (err) => {
-      fs.unlink(destPath, () => {});
-      reject(err);
-    });
-  });
-}
-
 export async function generateImage(category: ImageCategory, index: number): Promise<GeneratedImage> {
   const client = getOpenAIClient();
   const prompt = IMAGE_PROMPTS[category];
@@ -76,22 +42,27 @@ export async function generateImage(category: ImageCategory, index: number): Pro
   logger.info({ agent: AGENT, category, index }, `Generating image for category: ${category}`);
 
   const response = await client.images.generate({
-    model: 'dall-e-3',
+    model: 'gpt-image-1',
     prompt,
     size: '1024x1024',
-    quality: 'hd',
-    style: 'natural',
+    quality: 'high',
     n: 1,
   });
 
   const data = response.data ?? [];
-  const imageUrl = data[0]?.url;
-  if (!imageUrl) throw new Error(`DALL-E 3 returned no image URL for category: ${category}`);
+  const item = data[0];
+  if (!item) throw new Error(`gpt-image-1 returned no image data for category: ${category}`);
 
   const localPath = path.join(process.cwd(), 'data', 'images', category, `${timestamp}.png`);
-  await downloadImage(imageUrl, localPath);
 
-  logger.info({ agent: AGENT, category, localPath }, 'Image downloaded');
+  if (item.b64_json) {
+    // gpt-image-1 returns base64-encoded PNG
+    const buf = Buffer.from(item.b64_json, 'base64');
+    fs.writeFileSync(localPath, buf);
+    logger.info({ agent: AGENT, category, localPath }, 'Image saved from base64');
+  } else {
+    throw new Error(`gpt-image-1 returned no image content for category: ${category}`);
+  }
 
   return {
     localPath,
