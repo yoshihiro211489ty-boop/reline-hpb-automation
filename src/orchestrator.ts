@@ -18,6 +18,12 @@ import { runRankWatcher } from './agents/rankWatcher.js';
 import { runWeeklyReporter } from './agents/weeklyReporter.js';
 import { runGoogleReviewWatcher } from './agents/googleReviewWatcher.js';
 import { runGoogleReplyPoster } from './agents/googleReplyPoster.js';
+import { runPostingStatusChecker } from './agents/postingStatusChecker.js';
+import { runImageGenerator } from './agents/imageGenerator.js';
+import { runImageQualityChecker } from './agents/imageQualityChecker.js';
+import { runImageUploader } from './agents/imageUploader.js';
+import { runSalonboardSupervisor } from './agents/salonboardSupervisor.js';
+import type { GeneratedImage } from './types/index.js';
 
 const TZ = 'Asia/Tokyo';
 
@@ -209,6 +215,65 @@ async function main(): Promise<void> {
     }
   }
 
+  // ─────────────── 毎日: 投稿反映チェック ───────────────
+  if (shouldRun('postingStatusChecker')) {
+    const { result } = await runWithTimer('postingStatusChecker', runPostingStatusChecker);
+    if (result) {
+      results.push(result);
+      if (result.status === 'error') {
+        errors.push(`postingStatusChecker: ${result.error}`);
+        await notifyError('postingStatusChecker', result.error ?? '不明なエラー');
+      } else if (result.status === 'warn') {
+        // warn は通知のみ（エラーカウントには入れない）
+        logger.warn({ agent: 'orchestrator', data: result.data }, '投稿反映チェック: 要確認あり');
+      }
+    }
+  }
+
+  // ─────────────── 月曜: 画像生成・チェック・アップロード ───────────────
+  if (isMonday() && shouldRun('imageGenerator')) {
+    const IMAGE_CATEGORIES = ['kodawari', 'gallery', 'salon'] as const;
+    const { result: genResult } = await runWithTimer('imageGenerator', () =>
+      runImageGenerator([...IMAGE_CATEGORIES]),
+    );
+
+    if (genResult?.status === 'ok') {
+      results.push(genResult);
+      const generatedImages = (genResult.data as { generated: GeneratedImage[] })?.generated ?? [];
+
+      if (generatedImages.length > 0 && shouldRun('imageQualityChecker')) {
+        const { result: checkResult } = await runWithTimer('imageQualityChecker', () =>
+          runImageQualityChecker(generatedImages),
+        );
+        if (checkResult) {
+          results.push(checkResult);
+          const approvedImages = (checkResult.data as { approved: GeneratedImage[] })?.approved ?? [];
+
+          if (approvedImages.length > 0 && shouldRun('imageUploader')) {
+            const { result: uploadResult } = await runWithTimer('imageUploader', () =>
+              runImageUploader(approvedImages),
+            );
+            if (uploadResult) {
+              results.push(uploadResult);
+              if (uploadResult.status === 'error') {
+                errors.push(`imageUploader: ${uploadResult.error}`);
+                await notifyError('imageUploader', uploadResult.error ?? '不明なエラー');
+              }
+            }
+          }
+        }
+      }
+    } else if (genResult) {
+      // OpenAIキー未設定など設定起因エラーは静かにスキップ
+      const isSetupError = genResult.error?.includes('Keychain') || genResult.error?.includes('api-key');
+      if (!isSetupError) {
+        errors.push(`imageGenerator: ${genResult.error}`);
+      } else {
+        logger.info({ agent: 'orchestrator' }, '画像生成: OpenAI APIキー未設定のためスキップ');
+      }
+    }
+  }
+
   // ─────────────── 月曜: 競合調査・順位確認・週次レポート ───────────────
   if (isMonday()) {
     if (shouldRun('competitorScraper')) {
@@ -230,6 +295,17 @@ async function main(): Promise<void> {
       const { result } = await runWithTimer('weeklyReporter', runWeeklyReporter);
       if (result) results.push(result);
     }
+
+    // ─────────────── 月曜: サロンボード全体監視・改善提案 ───────────────
+    if (shouldRun('salonboardSupervisor')) {
+      const { result } = await runWithTimer('salonboardSupervisor', runSalonboardSupervisor);
+      if (result) {
+        results.push(result);
+        if (result.status === 'error') {
+          errors.push(`salonboardSupervisor: ${result.error}`);
+        }
+      }
+    }
   }
 
   // ─────────────── 日次 LINE 通知サマリー ───────────────
@@ -249,7 +325,7 @@ async function main(): Promise<void> {
     googleWarnCount > 0 ? `  承認待ち ${googleWarnCount}件 (別途通知済み)` : null,
     googleDangerCount > 0 ? `  要対応 ${googleDangerCount}件 (別途通知済み)` : null,
     isBlogDay(dayName) ? `\nブログ: ${blogPosted ? '投稿完了' : dryRun ? '[DRY] 生成のみ' : '投稿失敗'}` : null,
-    isMonday() ? `競合調査・順位確認: 完了` : null,
+    isMonday() ? `競合調査・順位確認・画像更新・改善提案: 完了` : null,
     ``,
     errors.length > 0 ? `エラー ${errors.length}件:\n${errors.map(e => `  - ${e}`).join('\n')}` : `エラー: 0件`,
   ].filter(Boolean).join('\n');

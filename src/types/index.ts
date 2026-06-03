@@ -119,3 +119,21 @@ export interface GooglePostResult {
   status: 'posted' | 'failed' | 'dry_run' | 'skipped';
   error?: string;
 }
+
+// ─── Image Generation ──────────────────────────────────────────────────────
+
+export type ImageCategory = 'kodawari' | 'gallery' | 'salon';
+
+export interface GeneratedImage {
+  localPath: string;
+  category: ImageCategory;
+  prompt: string;
+  generatedAt: string;
+}
+
+export interface ImageQualityResult {
+  passed: boolean;
+  aiScore: number;
+  issues: string[];
+  suggestion?: string;
+}
