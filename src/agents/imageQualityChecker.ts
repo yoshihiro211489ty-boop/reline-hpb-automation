@@ -8,27 +8,76 @@ import type { AgentResult, ImageCategory, GeneratedImage, ImageQualityResult } f
 
 const AGENT = 'imageQualityChecker';
 
-const SYSTEM_PROMPT = `あなたは日本の整体・骨盤矯正サロンのマーケティング画像品質チェッカーです。
-以下の基準で画像を評価し、JSONのみで回答してください。
+const SYSTEM_PROMPT = `あなたは日本の整体・骨盤矯正サロン「リライン」のマーケティング画像品質チェッカーです。
+画像を見て以下の全項目を厳密にチェックし、JSONのみで回答してください。
+**迷ったら必ず不合格にする。厳しく判定すること。**
 
-評価基準:
-1. 文字・テキスト混入: 画像内に文字・数字・記号・看板テキスト・ポスター文字・解剖図テキスト・ロゴ等が一切ないか（最重要・1文字でも不合格）
-2. AI生成感: 指の歪み・光の不自然さ・不自然なボケ・現実的でない素材感などがあるか
-3. 適切性: 日本の医療・ウェルネス業界のコンテンツとして不適切なものがないか（暴力・成人・不快感等）
-4. ブランド適合: リライン（清潔・プロフェッショナル・温かみ）のイメージに合っているか
-5. 使用可否: HPBサロンページに掲載して問題ないか
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【チェック項目】即不合格条件（1つでも該当すればpassed=false）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-出力JSON形式:
+■ A. 文字・テキスト混入
+  - 画像内に文字・数字・記号・看板・ポスター・ロゴが1文字でも存在する
+
+■ B. 解剖学的ありえない身体表現（最重要）
+  - 指の本数が正常でない（1手に6本以上・4本以下）
+  - 手や腕が体に溶け込んでいる・融合している
+  - 関節の曲がり方が人体として不可能
+  - 手が患者の体の「中」に埋まっている・消えている
+  - 施術者の腕が患者の体の下・裏側・反対側に回り込んでいる
+  - 施術者の手が患者の体の側面から変な角度で出ている
+  - 施術者と患者の手足が区別できない・同化している
+  - 腕が3本以上に見える・腕がねじれている
+
+■ C. 不適切・非常識な施術構図（即不合格）
+  - 施術者が患者の身体の上に座っている・乗っている・跨いでいる
+  - 施術者が患者のお尻・腰・脚の上に体重をかけている
+  - 施術者が患者にのしかかるような前傾姿勢で密着している
+  - うつ伏せのはずの患者の顔が正面や上や横を向いている（顔が見えてはいけない）
+  - 患者が苦痛・恐怖・不快の表情をしている
+  - 施術者の腕が患者の体を抱きかかえるように回り込んでいる
+  - 施術として物理的・医学的に不可能または危険な姿勢
+
+■ D. 不適切コンテンツ
+  - 肌の過度な露出（背中・胸・お尻・下半身）
+  - 性的・暴力的・不快な表現
+
+■ E. 片手だけの雑な施術構図
+  - 施術者が片手しか使っていない（もう一方の手が不自然に垂れている・消えている）
+  - プロの整体師として明らかにやる気がない・雑に見える構図
+
+■ F. AIアーティファクト（深刻なもの）
+  - 顔・目・耳の形状が不自然に歪んでいる
+  - 髪が背景に溶け込んでいる
+  - 光源・影の方向が複数箇所で矛盾している
+  - 布・床・壁のテクスチャが液状・融解している
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【合格基準】以下をすべて満たすこと
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ 患者はうつ伏せで顔が見えない（フェイスクレードルに収まっている）
+  ✓ 施術者は患者の横に立っており、体重を患者にかけていない
+  ✓ 施術者の両手が患者の背中・肩・腰に自然に置かれている
+  ✓ 施術シーンとして医学的・常識的に成立している
+  ✓ リラックスした清潔感のあるJapandiスタイルの空間
+  ✓ 全体的に実際の写真に見える
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【出力JSON形式】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {
   "passed": true/false,
   "hasText": true/false,
-  "textDescription": "検出した文字・テキストの説明（なければnull）",
+  "textDescription": "検出した文字の説明またはnull",
+  "bodyIssues": ["解剖学的問題点のリスト（なければ空配列）"],
+  "compositionIssues": ["構図・施術上の問題点のリスト（なければ空配列）"],
+  "aiArtifacts": ["AIアーティファクトのリスト（なければ空配列）"],
   "aiScore": 0-10,
-  "issues": ["問題点1", "問題点2"],
-  "suggestion": "改善のためのプロンプト修正案（問題ある場合のみ）"
+  "issues": ["全問題点をまとめたリスト"],
+  "suggestion": "再生成プロンプト修正案（不合格時のみ）"
 }
 
-重要: hasTextがtrueの場合は必ずpassedをfalseにしてください。`;
+重要: bodyIssues・compositionIssuesのどちらかに1つでも問題があればpassed=false`;
 
 function getAnthropicClient(): Anthropic {
   const apiKey = execSync(
@@ -38,7 +87,13 @@ function getAnthropicClient(): Anthropic {
   return new Anthropic({ apiKey });
 }
 
-function parseQualityResult(text: string): ImageQualityResult & { hasText: boolean; textDescription: string | null } {
+function parseQualityResult(text: string): ImageQualityResult & {
+  hasText: boolean;
+  textDescription: string | null;
+  bodyIssues: string[];
+  compositionIssues: string[];
+  aiArtifacts: string[];
+} {
   // コードブロック内のJSONを優先的に抽出
   const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const jsonStr = codeBlockMatch
@@ -51,6 +106,9 @@ function parseQualityResult(text: string): ImageQualityResult & { hasText: boole
     passed?: boolean;
     hasText?: boolean;
     textDescription?: string | null;
+    bodyIssues?: string[];
+    compositionIssues?: string[];
+    aiArtifacts?: string[];
     aiScore?: number;
     issues?: string[];
     suggestion?: string;
@@ -58,24 +116,40 @@ function parseQualityResult(text: string): ImageQualityResult & { hasText: boole
 
   const aiScore = parsed.aiScore ?? 10;
   const hasText = parsed.hasText ?? false;
+  const bodyIssues = parsed.bodyIssues ?? [];
+  const compositionIssues = parsed.compositionIssues ?? [];
+  const aiArtifacts = parsed.aiArtifacts ?? [];
   const issues = parsed.issues ?? [];
 
-  // hasTextがtrueなら必ず不合格
-  if (hasText && !issues.some(i => i.includes('文字') || i.includes('テキスト'))) {
-    issues.unshift(`画像に文字・テキストが含まれています: ${parsed.textDescription ?? '不明'}`);
+  // 各カテゴリの問題を issues に統合
+  if (hasText && !issues.some(i => i.includes('文字'))) {
+    issues.unshift(`文字混入: ${parsed.textDescription ?? '不明'}`);
+  }
+  if (bodyIssues.length > 0 && !issues.some(i => i.includes('解剖'))) {
+    issues.push(`解剖学的問題: ${bodyIssues.join(', ')}`);
+  }
+  if (compositionIssues.length > 0 && !issues.some(i => i.includes('構図'))) {
+    issues.push(`構図問題: ${compositionIssues.join(', ')}`);
+  }
+  if (aiArtifacts.length > 0 && !issues.some(i => i.includes('AI'))) {
+    issues.push(`AIアーティファクト: ${aiArtifacts.join(', ')}`);
   }
 
-  // passed の自動補正
-  const passed = hasText
+  // passed の自動補正（厳しめ）
+  const hasCriticalIssue = hasText || bodyIssues.length > 0 || compositionIssues.length > 0;
+  const passed = hasCriticalIssue || aiScore >= 7
     ? false
     : parsed.passed !== undefined
       ? parsed.passed
-      : aiScore <= 5 && issues.length === 0;
+      : aiScore <= 4 && issues.length === 0;
 
   return {
     passed,
     hasText,
     textDescription: parsed.textDescription ?? null,
+    bodyIssues,
+    compositionIssues,
+    aiArtifacts,
     aiScore,
     issues,
     suggestion: parsed.suggestion,

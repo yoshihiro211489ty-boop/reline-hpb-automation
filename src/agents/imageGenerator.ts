@@ -1,40 +1,46 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import OpenAI from 'openai';
+import https from 'https';
+import http from 'http';
 import { logger } from '../lib/logger.js';
 import { auditLog } from '../lib/db.js';
 import type { AgentResult, ImageCategory, GeneratedImage } from '../types/index.js';
 
 const AGENT = 'imageGenerator';
 
-/** カテゴリ別・バリエーション別プロンプト（毎週ローテーションして構図が被らないようにする） */
-const IMAGE_PROMPT_VARIANTS: Record<ImageCategory, string[]> = {
+/** Unsplash カテゴリ別検索キーワード（複数から週次ローテーション） */
+const UNSPLASH_QUERIES: Record<ImageCategory, string[]> = {
   kodawari: [
-    'Professional Japanese posture correction clinic, empty treatment room, beige massage table centered, soft warm overhead lighting, light wood floor, white walls, minimal decor, small potted green plant in corner, calm and serene atmosphere, photorealistic, ultra high detail, absolutely NO text NO letters NO signs NO writing NO labels NO posters NO charts of any kind anywhere in the image',
-    'Japanese osteopathy clinic interior, treatment bed with clean white pillow and beige cover, gentle natural light from frosted window, wooden shelves with neatly folded white towels, tranquil private room feel, photorealistic, ultra high detail, absolutely NO text NO letters NO signs NO writing NO labels NO charts NO posters anywhere in the image',
-    'Minimalist Japanese wellness clinic treatment room, overhead view angle, padded treatment table, neutral beige and cream tones, wooden accent wall, soft ambient lighting, small succulent on shelf, private and professional atmosphere, photorealistic, ultra high detail, strictly NO text NO letters NO words NO signs NO writing NO diagrams anywhere in the image',
-    'Cozy Japanese chiropractic clinic room, treatment table with fresh white cover, warm LED lighting, pale wood flooring, clean white ceiling, small green plant beside window, professional and welcoming, photorealistic, ultra high detail, no text no letters no signs no writing no labels no posters no charts anywhere',
+    'massage therapy treatment room',
+    'chiropractic treatment session',
+    'physical therapy back treatment',
+    'osteopathy spine treatment',
+    'wellness therapy private room',
+    'physiotherapy hands on back',
   ],
   gallery: [
-    'Interior of modern Japanese wellness clinic reception area, clean white desk, light wood accents, small indoor plants, bright natural light from large windows, comfortable waiting chairs in neutral tones, professional and warm atmosphere, photorealistic, ultra high detail, absolutely NO text NO letters NO signs NO writing NO labels NO logos anywhere in the image',
-    'Japanese posture clinic lobby interior, minimalist design, white and beige palette, wooden bench seating, potted leafy plant, soft indirect ceiling lighting, calm and welcoming space, photorealistic, ultra high detail, absolutely NO text NO letters NO words NO signs NO writing anywhere in the image',
-    'Modern Japanese clinic hallway, clean corridor with white walls and wood floor, gentle ambient lighting, small decorative plant at end of hall, private room doors closed, serene professional environment, photorealistic, ultra high detail, strictly NO text NO letters NO signs NO writing NO labels anywhere in the image',
-    'Peaceful Japanese health clinic interior, cream colored walls, natural wood furniture, single comfortable chair by window, sheer curtain with soft natural light, small green plant, clean and uncluttered, photorealistic, ultra high detail, no text no letters no signs no writing no labels no logos anywhere',
+    'wellness clinic interior',
+    'spa treatment room interior',
+    'massage therapy room',
+    'private clinic room minimalist',
+    'health studio interior japan',
+    'japandi spa room',
   ],
   salon: [
-    'Exterior of a small modern Japanese health clinic building, clean white facade, simple architectural lines, manicured small shrub by entrance, clear blue sky, daytime, suburban Japan, photorealistic, ultra high detail, absolutely NO text NO letters NO signs NO writing NO logos NO storefront text anywhere in the image',
-    'Front view of a tidy Japanese wellness clinic exterior, light gray exterior walls, glass entrance door, small potted plant by doorstep, sunny day, clean neighborhood street, professional appearance, photorealistic, ultra high detail, absolutely NO text NO letters NO words NO signs NO writing NO logos anywhere in the image',
-    'Japanese clinic building entrance close-up, frosted glass door, clean tile entryway, potted green plant beside door, warm sunlight, calm residential area, photorealistic, ultra high detail, strictly NO text NO letters NO signs NO writing NO logos NO building names anywhere in the image',
-    'Exterior side angle of a small Japanese medical clinic, white stucco walls, tidy landscaping with low green bushes, paved parking area, blue sky with light clouds, photorealistic, ultra high detail, no text no letters no signs no writing no logos no storefront text anywhere in the image',
+    'wellness studio exterior',
+    'health clinic building',
+    'spa exterior entrance',
+    'medical clinic exterior japan',
+    'beauty salon exterior modern',
+    'wellness center building',
   ],
 };
 
-function getOpenAIClient(): OpenAI {
-  const apiKey = execSync('security find-generic-password -s reline-openai -a api-key -w', {
+function getUnsplashApiKey(): string {
+  return execSync('security find-generic-password -s reline-unsplash -a api-key -w', {
     encoding: 'utf8',
   }).trim();
-  return new OpenAI({ apiKey });
 }
 
 function ensureImageDirs(): void {
@@ -47,60 +53,148 @@ function ensureImageDirs(): void {
   }
 }
 
-/** 今週の週番号を返す（0始まり）。バリアント選択に使用 */
-function getWeekVariantIndex(category: ImageCategory, offset: number = 0): number {
+/** 週番号＋カテゴリでクエリをローテーション */
+function getQueryForWeek(category: ImageCategory, offset: number = 0): string {
   const now = new Date();
-  // ISO週番号 + カテゴリのハッシュ + offset でバリアントを選ぶ
   const startOfYear = new Date(now.getFullYear(), 0, 1);
   const weekNum = Math.floor((now.getTime() - startOfYear.getTime()) / (7 * 24 * 60 * 60 * 1000));
   const categoryHash = category.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-  const variants = IMAGE_PROMPT_VARIANTS[category];
-  return (weekNum + categoryHash + offset) % variants.length;
+  const queries = UNSPLASH_QUERIES[category];
+  return queries[(weekNum + categoryHash + offset) % queries.length];
+}
+
+function downloadFile(url: string, destPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath);
+    const protocol = url.startsWith('https') ? https : http;
+    protocol.get(url, (response) => {
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        const redirectUrl = response.headers.location;
+        if (!redirectUrl) { reject(new Error('Redirect without location')); return; }
+        file.close();
+        fs.unlinkSync(destPath);
+        downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
+        return;
+      }
+      if (response.statusCode !== 200) {
+        reject(new Error(`HTTP ${response.statusCode}`));
+        return;
+      }
+      response.pipe(file);
+      file.on('finish', () => { file.close(); resolve(); });
+    }).on('error', (err) => {
+      fs.unlink(destPath, () => {});
+      reject(err);
+    });
+  });
+}
+
+/** Unsplash APIで画像を検索してランダムに1枚取得 */
+async function fetchUnsplashImage(
+  query: string,
+  accessKey: string
+): Promise<{ downloadUrl: string; description: string; photographer: string }> {
+  const encodedQuery = encodeURIComponent(query);
+  const apiUrl = `https://api.unsplash.com/search/photos?query=${encodedQuery}&per_page=30&orientation=landscape&content_filter=high`;
+
+  return new Promise((resolve, reject) => {
+    https.get(apiUrl, {
+      headers: {
+        'Authorization': `Client-ID ${accessKey}`,
+        'Accept-Version': 'v1',
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data) as {
+            results?: Array<{
+              urls: { regular: string; full: string };
+              description: string | null;
+              alt_description: string | null;
+              user: { name: string };
+            }>;
+            errors?: string[];
+          };
+
+          if (json.errors) {
+            reject(new Error(`Unsplash API error: ${json.errors.join(', ')}`));
+            return;
+          }
+
+          const results = json.results ?? [];
+          if (results.length === 0) {
+            reject(new Error(`Unsplash: no results for query "${query}"`));
+            return;
+          }
+
+          // ランダムに1枚選ぶ
+          const photo = results[Math.floor(Math.random() * results.length)];
+          resolve({
+            downloadUrl: photo.urls.regular,
+            description: photo.description ?? photo.alt_description ?? query,
+            photographer: photo.user.name,
+          });
+        } catch (e) {
+          reject(new Error(`Failed to parse Unsplash response: ${String(e)}`));
+        }
+      });
+    }).on('error', reject);
+  });
 }
 
 export async function generateImage(category: ImageCategory, index: number): Promise<GeneratedImage> {
-  const client = getOpenAIClient();
-  const variantIndex = getWeekVariantIndex(category, index);
-  const prompt = IMAGE_PROMPT_VARIANTS[category][variantIndex];
+  const accessKey = getUnsplashApiKey();
+  const query = getQueryForWeek(category, index);
   const timestamp = Date.now();
 
-  logger.info({ agent: AGENT, category, index }, `Generating image for category: ${category}`);
+  logger.info({ agent: AGENT, category, query }, `Fetching Unsplash image for category: ${category}`);
 
-  const response = await client.images.generate({
-    model: 'gpt-image-1',
-    prompt,
-    size: '1024x1024',
-    quality: 'high',
-    n: 1,
-  });
+  const { downloadUrl, description, photographer } = await fetchUnsplashImage(query, accessKey);
 
-  const data = response.data ?? [];
-  const item = data[0];
-  if (!item) throw new Error(`gpt-image-1 returned no image data for category: ${category}`);
+  const localPath = path.join(process.cwd(), 'data', 'images', category, `${timestamp}.jpg`);
+  await downloadFile(downloadUrl, localPath);
 
-  const localPath = path.join(process.cwd(), 'data', 'images', category, `${timestamp}.png`);
-
-  if (item.b64_json) {
-    // gpt-image-1 returns base64-encoded PNG
-    const buf = Buffer.from(item.b64_json, 'base64');
-    fs.writeFileSync(localPath, buf);
-    logger.info({ agent: AGENT, category, localPath }, 'Image saved from base64');
-  } else {
-    throw new Error(`gpt-image-1 returned no image content for category: ${category}`);
-  }
+  logger.info({ agent: AGENT, category, localPath, photographer }, 'Unsplash image downloaded');
 
   return {
     localPath,
     category,
-    prompt,
+    prompt: `Unsplash: "${query}" by ${photographer} — ${description}`,
     generatedAt: new Date().toISOString(),
   };
 }
 
 export async function runImageGenerator(categories: ImageCategory[]): Promise<AgentResult> {
   const start = Date.now();
-  logger.info({ agent: AGENT, categories }, 'ImageGenerator started');
+  logger.info({ agent: AGENT, categories }, 'ImageGenerator (Unsplash) started');
   ensureImageDirs();
+
+  // Unsplash APIキーが設定されているか確認
+  let hasApiKey = false;
+  try {
+    getUnsplashApiKey();
+    hasApiKey = true;
+  } catch {
+    logger.warn({ agent: AGENT }, 'Unsplash API key not set, skipping image generation');
+    return {
+      agent: AGENT,
+      status: 'warn',
+      data: { generated: [], errors: ['Unsplash APIキーが未設定です'] },
+      error: 'Unsplash APIキーが未設定です。setup-keychain.sh を実行してください。',
+      durationMs: Date.now() - start,
+    };
+  }
+
+  if (!hasApiKey) {
+    return {
+      agent: AGENT,
+      status: 'warn',
+      data: { generated: [], errors: [] },
+      durationMs: Date.now() - start,
+    };
+  }
 
   const generated: GeneratedImage[] = [];
   const errors: string[] = [];
@@ -110,16 +204,12 @@ export async function runImageGenerator(categories: ImageCategory[]): Promise<Ag
     try {
       const image = await generateImage(category, i);
       generated.push(image);
-      auditLog({
-        agent: AGENT,
-        event: 'image_generated',
-        status: 'ok',
-      });
+      auditLog({ agent: AGENT, event: 'image_fetched', status: 'ok' });
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
-      logger.error({ agent: AGENT, category, error: err }, 'Image generation failed');
+      logger.error({ agent: AGENT, category, error: err }, 'Image fetch failed');
       errors.push(`${category}: ${err}`);
-      auditLog({ agent: AGENT, event: 'image_generation_failed', status: 'error', error: err });
+      auditLog({ agent: AGENT, event: 'image_fetch_failed', status: 'error', error: err });
     }
   }
 
